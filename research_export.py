@@ -12,6 +12,7 @@ import json
 import sqlite3
 import zipfile
 from collections import Counter
+from contextlib import nullcontext
 from pathlib import Path
 
 from analyze import databases
@@ -24,13 +25,19 @@ def columns(db, table):
     return [r['name'] for r in db.execute(f'PRAGMA table_info({table})')]
 
 
-def export_research(paths, out, order_db=None, wallets=None, context_paths=None):
+def export_research(paths, out, order_db=None, wallets=None, context_paths=None, overview=False):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise ValueError(f'{out} is not empty; choose a new --out directory')
     manifest = {'version': 1, 'created_at': dt.datetime.now(dt.timezone.utc).isoformat(),
-                'sampling': 'none', 'files': [], 'counts': {}, 'warnings': []}
+                'mode': 'overview' if overview else 'full',
+                'sampling': 'metadata_only' if overview else 'none',
+                'files': [], 'counts': {}, 'warnings': []}
+    if overview:
+        manifest['omitted_files'] = ['market-events.jsonl.gz', 'market-trades.jsonl.gz',
+                                     'quote-observations.csv.gz']
+        manifest['count_scope'] = 'market_events and event-type counts describe source databases; raw frames are NOT exported'
     connections = []
     try:
         for path in paths:
@@ -42,19 +49,35 @@ def export_research(paths, out, order_db=None, wallets=None, context_paths=None)
             connections.append((Path(path).name, db))
 
         counts = Counter()
-        with gzip.open(out / 'market-events.jsonl.gz', 'wt', encoding='utf-8') as events, \
-                gzip.open(out / 'market-trades.jsonl.gz', 'wt', encoding='utf-8') as prints:
+        event_name = 'capture-metadata.jsonl.gz' if overview else 'market-events.jsonl.gz'
+        with gzip.open(out / event_name, 'wt', encoding='utf-8') as events, \
+                (nullcontext(None) if overview else gzip.open(out / 'market-trades.jsonl.gz', 'wt', encoding='utf-8')) as prints:
             for name, db in connections:
                 summary = {'database': name, 'events': 0, 'first_received_at': None,
                            'last_received_at': None}
                 if not columns(db, 'market_events'):
                     manifest['warnings'].append(f'{name}: no raw journal (older collector)')
                 else:
-                    for row in db.execute('SELECT * FROM market_events ORDER BY session_id, seq'):
+                    if overview:
+                        # Count source coverage without deserializing/copying the large frame payloads.
+                        for row in db.execute('SELECT event_type,count(*) AS n,min(received_at) AS first_at,'
+                                              'max(received_at) AS last_at FROM market_events GROUP BY event_type'):
+                            counts['market_events'] += row['n']
+                            counts[row['event_type']] += row['n']
+                            summary['events'] += row['n']
+                            summary['first_received_at'] = min(summary['first_received_at'] or row['first_at'], row['first_at'])
+                            summary['last_received_at'] = max(summary['last_received_at'] or row['last_at'], row['last_at'])
+                        query = "SELECT * FROM market_events WHERE event_type IN ('capture_start','stream_reset','schedule_decision') ORDER BY session_id,seq"
+                    else:
+                        query = 'SELECT * FROM market_events ORDER BY session_id, seq'
+                    for row in db.execute(query):
                         event = dict(row)
                         event['database'] = name
                         event['payload'] = json.loads(event.pop('payload_json'))
                         events.write(json.dumps(event, separators=(',', ':')) + '\n')
+                        if overview:
+                            counts['capture_metadata_exported'] += 1
+                            continue
                         counts['market_events'] += 1
                         counts[event['event_type']] += 1
                         summary['events'] += 1
@@ -76,7 +99,8 @@ def export_research(paths, out, order_db=None, wallets=None, context_paths=None)
                 manifest['files'].append(summary)
 
         # Stream large tables; preserve daily provenance and evolving column sets.
-        for table in ('quote_observations', 'markets', 'universe', 'gaps'):
+        tables = ('markets', 'universe', 'gaps') if overview else ('quote_observations', 'markets', 'universe', 'gaps')
+        for table in tables:
             header = list(dict.fromkeys(c for _, db in connections for c in columns(db, table)))
             with gzip.open(out / f'{table.replace("_", "-")}.csv.gz', 'wt',
                            encoding='utf-8', newline='') as handle:
@@ -131,7 +155,7 @@ def export_research(paths, out, order_db=None, wallets=None, context_paths=None)
             manifest['warnings'].append('No order database: run npm run pm:orders alongside the collector')
         manifest['counts'] = dict(counts)
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-        (out / 'README.md').write_text(README, encoding='utf-8')
+        (out / 'README.md').write_text((OVERVIEW_README if overview else '') + README, encoding='utf-8')
     finally:
         for _, db in connections:
             db.close()
@@ -142,6 +166,23 @@ def export_research(paths, out, order_db=None, wallets=None, context_paths=None)
                           compress_type=zipfile.ZIP_STORED if path.suffix == '.gz'
                           else zipfile.ZIP_DEFLATED)
     return manifest
+
+
+OVERVIEW_README = """# OVERVIEW ONLY — not a raw-book backup
+
+This bundle omits market-events, market-trades and quote-observations.
+It retains fills, signed orders when available, creation context, market registries,
+discovery records, gaps, and capture-metadata (capture_start, stream_reset,
+schedule_decision). Manifest event counts describe SOURCE rows, not exported frames.
+No public-trade count is calculated in this mode. This is for coverage review and
+selecting further research; it cannot reconstruct cancellation/replace sequences.
+Keep the original daily SQLite databases for subsequent full/case exports.
+
+The full-format reference below also describes files omitted from this overview.
+
+---
+
+"""
 
 
 README = """# Continuous Polymarket research capture
@@ -238,16 +279,17 @@ def main():
     parser.add_argument('--until', type=date_argument)
     parser.add_argument('--orders', help='signed-order SQLite, defaults to <db>/order-research.sqlite')
     parser.add_argument('--config', default='pm.config.json')
-    parser.add_argument('--out', default='research-export-' +
-                        dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S'))
+    parser.add_argument('--overview', action='store_true', help='compact metadata/order bundle; omit raw frames, public prints and all quote observations')
+    parser.add_argument('--out')
     args = parser.parse_args()
     paths = databases(args.db, args.since)
     if args.until:
         paths = [p for p in paths if Path(p).name[3:13] <= args.until]
     if not paths:
         parser.error('no daily databases in the requested date range')
+    args.out = args.out or ('research-overview-' if args.overview else 'research-export-') + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')
     result = export_research(paths, args.out, args.orders or str(Path(args.db)/'order-research.sqlite'),
-                             load_wallets(args.config), databases(args.db, None))
+                             load_wallets(args.config), databases(args.db, None), overview=args.overview)
     print(f'Wrote {args.out}/ and {args.out}.zip')
     print(json.dumps(result['counts'], indent=2))
     for warning in result['warnings']:

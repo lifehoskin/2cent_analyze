@@ -65,4 +65,8 @@ class OrderTests(unittest.TestCase):
    self.assertEqual(creation_context([r],daily)[-1]['context_status'],'capture_reset');self.assertEqual(discover(daily,{TARGET},since='2026-09-01'),{})
    odb=data/'order-research.sqlite';db=open_store(odb);ingest(db,FixtureRpc(c),r['tx_hash']);db.close()
    m=export_research(daily,Path(tmp)/'export',odb,{TARGET},daily);self.assertEqual(m['counts']['chain_fills'],1);self.assertEqual(m['counts']['signed_orders'],1);self.assertTrue((Path(tmp)/'export.zip').exists())
+   ov=export_research(daily,Path(tmp)/'overview',odb,{TARGET},daily,overview=True)
+   self.assertEqual(ov['counts']['signed_orders'],1);self.assertEqual(ov['counts']['order_creation_context'],4)
+   self.assertEqual((Path(tmp)/'overview/signed-orders.csv').read_text(),(Path(tmp)/'export/signed-orders.csv').read_text())
+   self.assertFalse((Path(tmp)/'overview/market-events.jsonl.gz').exists())
 if __name__=='__main__':unittest.main()

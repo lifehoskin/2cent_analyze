@@ -73,6 +73,29 @@ with tempfile.TemporaryDirectory() as tmp:
         fills = list(csv.DictReader(handle))
     assert len(fills) == 1 and fills[0]['fill_index'] == '1'
     assert Path(str(out) + '.zip').exists()
+    # Overview retains audit events and source counts without copying raw books.
+    with sqlite3.connect(first) as db:
+        db.execute('INSERT INTO market_events VALUES(?,?,?,?,?,?,?)',
+                   ('export-test',4,'2026-09-16T12:00:01Z',1,None,'stream_reset',json.dumps({'assets':['a']})))
+        db.execute('INSERT INTO market_events VALUES(?,?,?,?,?,?,?)',
+                   ('export-test',5,'2026-09-16T12:00:02Z',2,None,'schedule_decision',json.dumps({'conditionId':'c','status':'capacity'})))
+    small_out = Path(tmp) / 'overview'
+    overview = export_research([first, second], small_out, overview=True)
+    assert overview['mode'] == 'overview'
+    assert overview['counts']['market_events'] == 5
+    assert overview['counts']['capture_metadata_exported'] == 2
+    assert 'market_trades' not in overview['counts']
+    assert not any((small_out / n).exists() for n in overview['omitted_files'])
+    with gzip.open(small_out / 'capture-metadata.jsonl.gz', 'rt') as handle:
+        assert [json.loads(line)['event_type'] for line in handle] == ['stream_reset','schedule_decision']
+    assert (small_out / 'target-fills.csv').read_text() == (out / 'target-fills.csv').read_text()
+    assert (small_out / 'universe.csv.gz').exists()
+    # The real CLI recognizes the new option and produces the promised ZIP.
+    cli_out = Path(tmp) / 'cli-overview'
+    subprocess.run(['python3','research_export.py','--db',str(data),'--since','2026-09-16',
+                    '--until','2026-09-17','--overview','--out',str(cli_out)], cwd=ROOT,
+                   check=True, capture_output=True, text=True)
+    assert Path(str(cli_out) + '.zip').exists()
     # A later daily DB contains only re-polled history, not new fills.
     history = export_research([second], Path(tmp) / 'history')
     assert history['counts']['target_fills_in_selected_days'] == 0
