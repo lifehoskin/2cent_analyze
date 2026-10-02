@@ -25,7 +25,8 @@ def columns(db, table):
     return [r['name'] for r in db.execute(f'PRAGMA table_info({table})')]
 
 
-def export_research(paths, out, order_db=None, wallets=None, context_paths=None, overview=False):
+def export_research(paths, out, order_db=None, wallets=None, context_paths=None, overview=False,
+                    requested_since=None, requested_until=None):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
@@ -34,6 +35,21 @@ def export_research(paths, out, order_db=None, wallets=None, context_paths=None,
                 'mode': 'overview' if overview else 'full',
                 'sampling': 'metadata_only' if overview else 'none',
                 'files': [], 'counts': {}, 'warnings': []}
+    if requested_since or requested_until:
+        present_days = sorted(Path(p).name[3:13] for p in paths)
+        start = dt.date.fromisoformat(requested_since or present_days[0])
+        finish = dt.date.fromisoformat(requested_until or present_days[-1])
+        manifest['requested_date_range'] = {'since': requested_since, 'until': requested_until,
+                                            'timezone': 'UTC', 'inclusive': True}
+        missing = []
+        day = start
+        while day <= finish:
+            if day.isoformat() not in present_days:
+                missing.append(day.isoformat())
+            day += dt.timedelta(days=1)
+        manifest['missing_daily_databases'] = missing
+        if missing:
+            manifest['warnings'].append('No daily databases for requested UTC dates: ' + ', '.join(missing))
     if overview:
         manifest['omitted_files'] = ['market-events.jsonl.gz', 'market-trades.jsonl.gz',
                                      'quote-observations.csv.gz']
@@ -289,7 +305,8 @@ def main():
         parser.error('no daily databases in the requested date range')
     args.out = args.out or ('research-overview-' if args.overview else 'research-export-') + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')
     result = export_research(paths, args.out, args.orders or str(Path(args.db)/'order-research.sqlite'),
-                             load_wallets(args.config), databases(args.db, None), overview=args.overview)
+                             load_wallets(args.config), databases(args.db, None), overview=args.overview,
+                             requested_since=args.since, requested_until=args.until)
     print(f'Wrote {args.out}/ and {args.out}.zip')
     print(json.dumps(result['counts'], indent=2))
     for warning in result['warnings']:

@@ -96,6 +96,14 @@ with tempfile.TemporaryDirectory() as tmp:
                     '--until','2026-09-17','--overview','--out',str(cli_out)], cwd=ROOT,
                    check=True, capture_output=True, text=True)
     assert Path(str(cli_out) + '.zip').exists()
+    missing_out = Path(tmp) / 'missing-dates'
+    missing = export_research([first, second], missing_out, overview=True,
+                             requested_since='2026-09-15', requested_until='2026-09-18')
+    assert missing['missing_daily_databases'] == ['2026-09-15', '2026-09-18']
+    assert any('No daily databases' in warning for warning in missing['warnings'])
+    import zipfile
+    with zipfile.ZipFile(str(missing_out) + '.zip') as archive:
+        assert json.loads(archive.read('manifest.json'))['missing_daily_databases'] == missing['missing_daily_databases']
     # A later daily DB contains only re-polled history, not new fills.
     history = export_research([second], Path(tmp) / 'history')
     assert history['counts']['target_fills_in_selected_days'] == 0
