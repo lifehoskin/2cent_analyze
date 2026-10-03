@@ -97,6 +97,15 @@ a new exchange quote. A capture_start resets the entire session. A stream_reset
 invalidates affected tokens until a full book/checkpoint establishes them again.
 Ignore deltas until a valid full book exists. Missing state is unknown, not zero.
 
+CRITICAL: apply each token only from its owning subscription connection. The
+same multi-token price_change can be received on two sockets; applying both
+copies can rewind a book and manufacture cancellation/replace cycles. Ownership
+is recorded by subscribe/unsubscribe resets (overview/capture-metadata.jsonl.gz)
+and, in capture v2, checkpoint source_connection_id. Capture v2 declares
+book_apply_policy=connection_owned_assets. Old v1 checkpoints/quote observations
+can contain merge artifacts: for corrected v1 replay, bootstrap from real full
+books on the owning connection and ignore old checkpoints as state replacements.
+
 There are 120 seconds of warm-up before the requested analysis window by default.
 This may contain a bootstrap checkpoint, but does NOT guarantee one or continuous
 coverage. Any bootstrap gap remains unknown. Sequence gaps are expected because

@@ -214,14 +214,22 @@ Files may be large. Every database is read from a consistent SQLite snapshot.
   checkpoints, resets and `capture_start` with the effective configuration.
   Within each session replay ascending `seq`, across daily files. Sessions are
   independent: do not join a previous session's book to a restarted process.
-  `frame` payloads are arrays; apply ALL messages before calculating paired
-  features. `book` replaces a token's entire book; `price_change.size` is the
+  `frame` payloads are arrays. Apply only each token's owning-connection entries
+  (see subscribe/unsubscribe resets and checkpoint source_connection_id), then
+  calculate paired features after the entire accepted batch. A multi-token
+  price_change can arrive on two sockets; applying its foreign leg again can
+  rewind the book. Raw frames intentionally retain both copies for auditing.
+  `book` replaces a token's entire book; `price_change.size` is the
   NEW absolute size at that side/price, not an increment. `checkpoint` replaces
   the complete known book set and retains each book's last source timestamp.
   `stream_reset` invalidates its assets until the next full `book`. Retain but
   do not apply deltas for unknown books. A gap is unknown state, not zero depth.
   A later day begins with a local checkpoint even if no new market message
   arrives at midnight. A checkpoint repeats state; it is not a fresh quote.
+  Capture version 2 declares book_apply_policy=connection_owned_assets. Version 1
+  checkpoints/quote_observations can contain cross-socket merge artifacts. For
+  a corrected replay of v1, reconstruct ownership from resets, start from actual
+  owning-socket full books, and do not overwrite them with legacy checkpoints.
 - `market-trades.jsonl.gz`: every `last_trade_price` message, with a join back
   to session/frame/message index. These public prints have no reliable wallet
   attribution; they are evidence for execution, not proof who owned a bid.

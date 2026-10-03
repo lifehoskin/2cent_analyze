@@ -3,6 +3,7 @@
 //   node src/pm/ws.test.mjs
 import assert from 'node:assert/strict';
 import { BookFeed } from './ws.mjs';
+import { MarketCapture } from './capture.mjs';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -181,3 +182,43 @@ assert.deepEqual(JSON.parse(reconnected.sent[0]).assets_ids, ['b','c'], 'reconne
 changing.feed.stop();
 assert.equal(changing.feed.setAssets(['b','c']), true, 'feed can restart after stop');
 changing.feed.stop();
+
+// Recorded failure: one multi-token delta is delivered on both subscriptions.
+// A slow copy must not roll the faster token back and create a fake cancel/replace.
+const ownedBooks = new Map();
+const rawJournal = [];
+const ownerCapture = new MarketCapture({ books: ownedBooks,
+  store: { add: (table, row) => rawJournal.push({table, row}) } });
+const split = makeFeed({ assetsPerConnection: 1,
+  onBatch: (batch, meta) => ownerCapture.processBatch(batch, meta),
+  onReset: (assets, reason, meta) => ownerCapture.reset(assets, reason, meta) });
+split.feed.setAssets(['a','b']);
+const [sa,sb] = FakeSocket.instances;
+sa.emit('open'); sb.emit('open');
+const send = (socket, message) => socket.emit('message', {data: JSON.stringify(message)});
+for (const [asset,socket] of [['a',sa],['b',sb]]) send(socket,
+  {event_type:'book',asset_id:asset,timestamp:'1000',bids:[],asks:[]});
+const change = (timestamp, size) => ({event_type:'price_change',market:'m',timestamp,
+  price_changes:[{asset_id:'a',side:'BUY',price:'.02',size},
+                 {asset_id:'b',side:'SELL',price:'.98',size}]});
+const oldDelta = change('2000','1000');
+const newDelta = change('3000','0');
+send(sa,oldDelta); send(sa,newDelta); send(sb,oldDelta);
+assert.equal(ownedBooks.get('a').sizeAt(.02),0,'foreign delayed copy cannot restore a removed bid');
+assert.equal(ownedBooks.get('a').lastUpdate,3000,'foreign copy cannot rewind source time');
+assert.equal(ownedBooks.get('b').askSizeAt(.98),1000,'owned slower leg still applies in its own order');
+send(sb,newDelta);
+assert.equal(ownedBooks.get('b').askSizeAt(.98),0);
+const frames = rawJournal.filter(r=>r.table==='market_events' && r.row[5]==='frame');
+assert.deepEqual(JSON.parse(frames.at(-2).row[6]),[oldDelta],'raw duplicate is retained intact for audit');
+const aQuotes = rawJournal.filter(r=>r.table==='quote_observations' && r.row[3]==='a');
+assert.equal(aQuotes.length,3,'a has initial, add and remove only');
+send(sa,change('4000','1000')); send(sa,change('4000','0'));
+assert.equal(ownedBooks.get('a').sizeAt(.02),0,'distinct same-millisecond updates are not deduplicated');
+ownerCapture.checkpoint();
+const checkpoint = JSON.parse(rawJournal.filter(r=>r.table==='market_events' && r.row[5]==='checkpoint').at(-1).row[6]);
+assert.ok(checkpoint.every(b=>b.source_connection_id),'daily bootstrap records per-token source connection');
+split.feed.setAssets(['b']);
+send(sb,change('5000','1000'));
+assert.equal(ownedBooks.has('a'),false,'foreign delta cannot resurrect unsubscribed token');
+split.feed.stop();

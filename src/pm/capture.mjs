@@ -12,6 +12,7 @@ export class MarketCapture {
     Object.assign(this, { store, books, pairOf, onBook, onForget,
       depthAbovePrice, enabled, prices, sessionId });
     this.seq = 0;
+    this.sourceConnections = new Map();
   }
 
   write(type, payload, meta = {}) {
@@ -27,6 +28,7 @@ export class MarketCapture {
     this.write('stream_reset', { assets, reason }, meta);
     for (const asset of assets) {
       this.books.delete(asset);
+      this.sourceConnections.delete(asset);
       this.onForget(asset);
     }
   }
@@ -35,6 +37,11 @@ export class MarketCapture {
     const receivedAt = meta.receivedAt ?? new Date().toISOString();
     const context = { ...meta, receivedAt };
     const seq = this.write('frame', messages, context);
+    // Keep the complete raw batch above. Apply each token only from the
+    // connection that owns its subscription, preserving that socket's order.
+    // The other outcome can be subscribed on a different socket and cause the
+    // identical multi-token price_change to arrive again after newer updates.
+    const accepts = asset => !meta.ownedAssets || meta.ownedAssets.has(asset);
     const before = new Map();
     const triggers = new Map();
     const initial = new Set();
@@ -47,6 +54,7 @@ export class MarketCapture {
     };
     for (const message of messages) {
       if (message.event_type === 'book') {
+        if (!accepts(message.asset_id)) continue;
         let book = this.books.get(message.asset_id);
         if (!book) {
           initial.add(message.asset_id);
@@ -55,8 +63,10 @@ export class MarketCapture {
         }
         remember(book, 'book');
         book.applyBook(message);
+        if (meta.connectionId) this.sourceConnections.set(message.asset_id, meta.connectionId);
       } else if (message.event_type === 'price_change') {
         for (const entry of message.price_changes ?? []) {
+          if (!accepts(entry.asset_id)) continue;
           const book = this.books.get(entry.asset_id);
           // Deltas received before a full snapshot remain in the raw journal,
           // but cannot establish a complete book after a gap.
@@ -65,6 +75,7 @@ export class MarketCapture {
           book.applyPriceChange(entry, message.timestamp);
         }
       } else if (message.event_type === 'tick_size_change') {
+        if (!accepts(message.asset_id)) continue;
         const book = this.books.get(message.asset_id);
         const tick = Number(message.new_tick_size);
         if (book && tick > 0) book.tickSize = tick;
@@ -101,7 +112,9 @@ export class MarketCapture {
   checkpoint(meta = {}) {
     if (!this.enabled || !this.books.size) return;
     const ts = meta.receivedAt ?? new Date().toISOString();
-    const seq = this.write('checkpoint', [...this.books.values()].map(b => b.snapshot()),
+    const seq = this.write('checkpoint', [...this.books.values()].map(b => ({ ...b.snapshot(),
+      ...(this.sourceConnections.has(b.assetId) ? { source_connection_id: this.sourceConnections.get(b.assetId) } : {}),
+    })),
       { ...meta, receivedAt: ts });
     for (const book of this.books.values()) this.observe(book, seq, ts, 'checkpoint');
   }

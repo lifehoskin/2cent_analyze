@@ -24,6 +24,7 @@ class Connection {
   constructor(feed, assets) {
     this.feed = feed;
     this.assets = assets;
+    this.assetSet = new Set(assets);
     this.id = `connection-${++connectionSequence}`;
   }
 
@@ -63,7 +64,7 @@ class Connection {
     this.#ws.addEventListener('message', (event) => {
       if (this.#stopped || this.#ws !== socket || this.#timer) return;
       const meta = { connectionId: this.id, receivedAt: new Date().toISOString(),
-        monotonicMs: performance.now() };
+        monotonicMs: performance.now(), ownedAssets: this.assetSet };
       const data = typeof event.data === 'string' ? event.data : String(event.data);
       let parsed;
       try {
@@ -75,9 +76,18 @@ class Connection {
       // are single objects.
       const batch = (Array.isArray(parsed) ? parsed : [parsed]).filter(m => m?.event_type
         // A queued snapshot after unsubscribe must not resurrect a retired book.
-        && (m.event_type !== 'book' || this.assets.includes(m.asset_id)));
+        && (m.event_type !== 'book' || this.assetSet.has(m.asset_id)));
       if (this.feed.onBatch) this.feed.onBatch(batch, meta);
-      else for (const message of batch) this.feed.onMessage?.(message, meta);
+      else for (const message of batch) {
+        // A market price_change can carry both tokens even when this socket
+        // subscribes to only one. Never apply its foreign leg a second time.
+        if (message.event_type === 'price_change' && Array.isArray(message.price_changes)) {
+          const owned = message.price_changes.filter(x => this.assetSet.has(x.asset_id));
+          if (owned.length) this.feed.onMessage?.({ ...message, price_changes: owned }, meta);
+        } else if (!message.asset_id || this.assetSet.has(message.asset_id)) {
+          this.feed.onMessage?.(message, meta);
+        }
+      }
     });
 
     this.#ws.addEventListener('close', () => {
@@ -112,6 +122,7 @@ class Connection {
     const removed = this.assets.filter(a => !desired.has(a));
     const added = assets.filter(a => !previous.has(a));
     this.assets = assets;
+    this.assetSet = desired;
     if (removed.length) this.feed.onReset?.(removed, 'unsubscribe', { connectionId: this.id });
     // While connecting/reconnecting, open() will subscribe to the latest set.
     if (!this.#ready || this.#stopped) return;

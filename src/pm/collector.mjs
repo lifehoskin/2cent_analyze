@@ -176,7 +176,7 @@ const capture = new MarketCapture({ store, books,
   onForget: asset => detector.forget(asset), depthAbovePrice: config.sweep.depthAbovePrice,
   enabled: config.capture.enabled,
 });
-capture.write('capture_start', { version: 1, wallets: config.wallets.addresses,
+capture.write('capture_start', { version: 2, book_apply_policy: 'connection_owned_assets', wallets: config.wallets.addresses,
   watch_prices: capture.prices, config });
 
 const feed = new BookFeed({
