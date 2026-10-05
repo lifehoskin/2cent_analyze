@@ -64,6 +64,7 @@ export function parseTimestamp(value) {
 }
 
 const HOUR = 3600 * 1000;
+const isMatchWinner = (entry) => entry.record.level === 'match' && entry.record.kind === 'winner';
 
 /**
  * When play starts, and how we know.
@@ -221,9 +222,12 @@ export class MarketSchedule {
     // What a discipline already holds, counted after the releases above so a
     // market let go this round frees its slot immediately.
     const perSport = new Map();
+    const matchWinnersPerSport = new Map();
     for (const conditionId of this.#live) {
-      const sport = this.#entries.get(conditionId)?.record?.sport ?? '';
+      const entry = this.#entries.get(conditionId);
+      const sport = entry?.record?.sport ?? '';
       perSport.set(sport, (perSport.get(sport) ?? 0) + 1);
+      if (isMatchWinner(entry)) matchWinnersPerSport.set(sport, (matchWinnersPerSport.get(sport) ?? 0) + 1);
     }
 
     // Under a cap, what gets the remaining slots is decided by where the
@@ -240,13 +244,23 @@ export class MarketSchedule {
     for (const entry of this.#rank(waiting, quota)) {
       const sport = entry.record.sport ?? '';
       const full = (perSport.get(sport) ?? 0) >= maxLivePerSport;
-      if ((this.#live.size >= maxLive || full) && entry.source !== 'wallet') {
+      // Keep room for main markets discovered after numerous set/map markets.
+      // Ranking only the current waiting list cannot prevent that starvation.
+      // Reserve is inside the existing sport cap; unused places stay empty.
+      const requested = this.config.reserveMatchWinnerPerSport?.[sport] ?? 0;
+      const reserve = Number.isFinite(maxLivePerSport) && Number.isFinite(requested)
+        ? Math.min(Math.max(0, Math.floor(requested)), Math.max(0, Math.floor(maxLivePerSport))) : 0;
+      const unfilledReserve = Math.max(0, reserve - (matchWinnersPerSport.get(sport) ?? 0));
+      const reservedForMain = !isMatchWinner(entry)
+        && (perSport.get(sport) ?? 0) >= maxLivePerSport - unfilledReserve;
+      if ((this.#live.size >= maxLive || full || reservedForMain) && entry.source !== 'wallet') {
         entry.deferredForCapacity = true;
         continue;
       }
       entry.deferredForCapacity = false;
       {
         perSport.set(sport, (perSport.get(sport) ?? 0) + 1);
+        if (isMatchWinner(entry)) matchWinnersPerSport.set(sport, (matchWinnersPerSport.get(sport) ?? 0) + 1);
         entry.subscribedAt = new Date(now).toISOString();
         this.#live.add(entry.conditionId);
         const [a, b] = entry.record.tokens;

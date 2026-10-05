@@ -84,6 +84,10 @@ export const DEFAULTS = {
     // whatever the ceiling says.
     maxLiveMarkets: null,
     maxLivePerSport: 150,
+    // Research allocation, not a trading signal: the Oct 5 audit found 150
+    // tennis set markets and zero main winners. Keep 30 of those same 150
+    // places available for main winners, including later discovery arrivals.
+    reserveMatchWinnerPerSport: { tennis: 30 },
     // Resolution is what really ends a subscription; the hold above is the
     // backstop. Asking costs one CLOB request per market, so it starts only
     // once the match could plausibly be over.

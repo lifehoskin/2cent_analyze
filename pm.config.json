@@ -37,6 +37,7 @@
     "maxAheadHours": 72,
     "maxLiveMarkets": null,
     "maxLivePerSport": 150,
+    "reserveMatchWinnerPerSport": { "tennis": 30 },
     "resolutionCheckMinutes": 15,
     "resolutionCheckAfterMinutes": 45,
     "resolutionCheckOpenHorizonSeconds": 60,
