@@ -6,8 +6,9 @@
 //    A (-6.5) vs B (+6.5)" and "Games Total: O/U 2.5" name no sport at all.
 // 2. Level and kind are independent axes. "Map 3 Total Rounds: O/U 24.5" is a
 //    total inside a segment, while "Games Total: O/U 2.5" is a total over the
-//    whole match. Collapsing them into one label loses the distinction the bot
-//    study depends on, since it works segment-level and loses money match-level.
+//    whole match. Keep these distinct so research can compare their behavior.
+// 3. "Completed Match", a toss and a first corner are different propositions
+//    from the match winner, even when their question contains both team names.
 
 const SEGMENT = /\b(map|game|set)\s*(\d+)\b/i;
 const HANDICAP = /handicap/i;
@@ -19,6 +20,15 @@ const LINE = /([+-]?\d+(?:\.\d+)?)/;
 const UNITS = [[/kills?/i, 'kill'], [/rounds?/i, 'round'], [/games?/i, 'game'],
   [/sets?/i, 'set'], [/maps?/i, 'map']];
 const VERSUS = /^(.*?)\s+vs\.?\s+(.*?)$/i;
+
+function auxiliaryKind(market, question) {
+  const type = String(market.sportsMarketType ?? '').toLowerCase();
+  if (type.endsWith('_completed_match') || /\bcompleted\s+match\b/i.test(question)) return 'completed_match';
+  if (type.endsWith('_toss_winner') || /\b(wins?\s+the\s+toss|toss\s+winner)\b/i.test(question)) return 'toss_winner';
+  if (type === 'soccer_first_corner' || /\bfirst\s+corner\b/i.test(question)) return 'first_corner';
+  if (type === 'soccer_game_corners_odd_even' || /\bcorners?\b.*\bodd\s+or\s+even\b/i.test(question)) return 'corners_odd_even';
+  return null;
+}
 
 /** Gamma encodes these as JSON strings, not arrays. */
 export function parseJsonField(value) {
@@ -59,7 +69,7 @@ function teamsOf(question, eventTitle, outcomes) {
 }
 
 function lineOf(question, kind) {
-  if (kind === 'winner') return null;
+  if (kind !== 'handicap' && kind !== 'total') return null;
   // For a handicap the sign matters and belongs to the first competitor; for a
   // total the number is the line itself.
   const tail = kind === 'handicap' ? /\(([+-]\d+(?:\.\d+)?)\)/.exec(question) : null;
@@ -76,12 +86,13 @@ export function classifyMarket(market, disciplines = {}) {
   const question = String(market.question ?? '');
   const event = (market.events ?? [])[0] ?? {};
   const prefix = slugPrefix(event.slug);
-  const segment = SEGMENT.exec(question);
+  const auxiliary = auxiliaryKind(market, question);
+  const segment = auxiliary ? null : SEGMENT.exec(question);
 
-  const kind = HANDICAP.test(question) ? 'handicap'
+  const kind = auxiliary ?? (HANDICAP.test(question) ? 'handicap'
     : TOTAL.test(question) ? 'total'
     : WINNER.test(question) ? 'winner'
-    : 'winner'; // a bare "A vs B (BO3) - Tournament" is the match winner
+    : 'winner'); // a bare "A vs B (BO3) - Tournament" is the match winner
 
   const outcomes = parseJsonField(market.outcomes);
   const tokens = parseJsonField(market.clobTokenIds);
@@ -102,13 +113,16 @@ export function classifyMarket(market, disciplines = {}) {
     sport: (prefix && disciplines[prefix]) ?? null,
     level: segment ? 'segment' : 'match',
     kind,
+    sportsMarketType: market.sportsMarketType ?? null,
     segmentKind: segment ? segment[1].toLowerCase() : null,
     segmentNo: segment ? Number(segment[2]) : null,
     line: lineOf(question, kind),
     // Two totals at the same level are still different questions when one
     // counts games and the other sets. Without this, "Total Sets O/U 2.5"
     // pairs with gg.bet's games total and the dislocation is meaningless.
-    unit: kind === 'winner' ? null : (UNITS.find(([p]) => p.test(question))?.[1] ?? null),
+    unit: kind === 'first_corner' || kind === 'corners_odd_even' ? 'corner'
+      : kind !== 'total' && kind !== 'handicap' ? null
+      : (UNITS.find(([p]) => p.test(question))?.[1] ?? null),
     teams: teamsOf(question, event.title, outcomes),
     outcomes,
     tokens,
