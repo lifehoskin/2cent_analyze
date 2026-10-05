@@ -13,6 +13,39 @@ class FixtureRpc:
  def __init__(self,case):self.case=case
  def call(self,method,params):return self.case[{'eth_getTransactionByHash':'tx','eth_getTransactionReceipt':'receipt','eth_getBlockByHash':'block'}[method]]
 class OrderTests(unittest.TestCase):
+ def test_old_pending_cache_recovers_to_mined_fill(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   db=open_store(Path(tmp)/'orders.sqlite');c=copy.deepcopy(CASES[3]);txhash=c['tx']['hash']
+   pending=dict(c['tx'],blockHash=None,blockNumber=None)
+   key=json.dumps(['eth_getTransactionByHash',[txhash]],separators=(',',':'))
+   db.execute('INSERT INTO rpc_cache VALUES(?,?,?,?)',(key,'eth_getTransactionByHash',json.dumps([txhash]),json.dumps(pending)));db.commit()
+   class RecoveredRpc(Rpc):
+    def _request(self,endpoint,method,params):
+     return {'eth_getTransactionByHash':c['tx'],'eth_getTransactionReceipt':c['receipt'],'eth_getBlockByHash':c['block']}[method]
+   rpc=RecoveredRpc(db,['fixture']);rpc.checked.add('fixture');ingest(db,rpc,txhash)
+   self.assertEqual(db.execute('SELECT status FROM transactions WHERE tx_hash=?',(txhash,)).fetchone()[0],'decoded')
+   self.assertEqual(db.execute('SELECT count(*) FROM chain_fills').fetchone()[0],5)
+   self.assertEqual(json.loads(db.execute('SELECT result_json FROM rpc_cache WHERE cache_key=?',(key,)).fetchone()[0])['blockHash'],c['tx']['blockHash']);db.close()
+ def test_pending_response_not_cached_and_next_pass_recovers(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   db=open_store(Path(tmp)/'orders.sqlite');c=copy.deepcopy(CASES[3])
+   class ChangingRpc(Rpc):
+    ready=False
+    def _request(self,endpoint,method,params):return c['tx'] if self.ready else dict(c['tx'],blockHash=None,blockNumber=None)
+   rpc=ChangingRpc(db,['fixture']);rpc.checked.add('fixture')
+   with self.assertRaisesRegex(ValueError,'not mined'):rpc.call('eth_getTransactionByHash',[c['tx']['hash']])
+   self.assertEqual(db.execute('SELECT count(*) FROM rpc_cache').fetchone()[0],0)
+   rpc.ready=True;self.assertEqual(rpc.call('eth_getTransactionByHash',[c['tx']['hash']])['blockHash'],c['tx']['blockHash']);db.close()
+ def test_pending_provider_falls_back_and_mined_cache_is_reused(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   db=open_store(Path(tmp)/'orders.sqlite');c=copy.deepcopy(CASES[3]);calls=[]
+   class LaggingRpc(Rpc):
+    def _request(self,endpoint,method,params):
+     calls.append(endpoint)
+     return dict(c['tx'],blockHash=None,blockNumber=None) if endpoint=='lagging' else c['tx']
+   rpc=LaggingRpc(db,['lagging','current']);rpc.checked.update(['lagging','current'])
+   for _ in range(2):self.assertEqual(rpc.call('eth_getTransactionByHash',[c['tx']['hash']])['blockHash'],c['tx']['blockHash'])
+   self.assertEqual(calls,['lagging','current']);db.close()
  def test_original_and_partial(self):
   fills=[r for c in CASES[:3] for r in decode_transaction(c['tx'],c['receipt'],c['block']) if r['wallet']==TARGET]
   cs=[r for r in fills if r['condition_id'].startswith('0xe64d')];tennis=[r for r in fills if r['condition_id'].startswith('0x114d')]

@@ -62,7 +62,13 @@ class Rpc:
         key = json.dumps([method, params], separators=(',', ':'))
         old = self.db.execute('SELECT result_json FROM rpc_cache WHERE cache_key=?', (key,)).fetchone()
         if old:
-            return json.loads(old[0])
+            result = json.loads(old[0])
+            if self._is_mined_result(method, result):
+                return result
+            # Older versions cached pending transactions permanently. Discard
+            # that transient response so the normal retry can observe mining.
+            self.db.execute('DELETE FROM rpc_cache WHERE cache_key=?', (key,))
+            self.db.commit()
         errors = []
         for endpoint in self.endpoints:
             try:
@@ -71,6 +77,8 @@ class Rpc:
                         raise ValueError('RPC is not Polygon chain 137')
                     self.checked.add(endpoint)
                 result = self._request(endpoint, method, params)
+                if not self._is_mined_result(method, result):
+                    raise ValueError('transaction not mined')
                 self.db.execute('INSERT OR REPLACE INTO rpc_cache VALUES(?,?,?,?)',
                                 (key, method, json.dumps(params), json.dumps(result)))
                 self.db.commit()
@@ -79,6 +87,12 @@ class Rpc:
                 # Do not expose endpoint credentials in exported errors.
                 errors.append(type(error).__name__+': '+str(error).split('https://')[0][:200])
         raise ValueError('; '.join(errors))
+
+    @staticmethod
+    def _is_mined_result(method, result):
+        if method in ('eth_getTransactionByHash', 'eth_getTransactionReceipt'):
+            return isinstance(result, dict) and result.get('blockHash') is not None and result.get('blockNumber') is not None
+        return True
 
 
 def load_wallets(config):
